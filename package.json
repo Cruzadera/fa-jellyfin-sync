@@ -1,0 +1,11 @@
+{
+  "name": "fa-jellyfin-sync",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "node scheduler.js",
+    "test": "npm test"
+  },
+  "dependencies": {
+    "node-fetch": "^3.0.0"
+  }
+}
