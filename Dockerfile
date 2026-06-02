@@ -1,7 +1,8 @@
 FROM node:20-alpine
 WORKDIR /app
+RUN apk add --no-cache fontconfig ttf-dejavu
 COPY package*.json ./
-RUN npm ci --production
+RUN npm ci --omit=dev
 COPY . .
 ENV NODE_ENV=production
-CMD ["node", "scheduler.js"]
+CMD ["npm", "start"]

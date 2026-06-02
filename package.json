@@ -2,10 +2,12 @@
   "name": "fa-jellyfin-sync",
   "version": "0.1.0",
   "scripts": {
-    "start": "node scheduler.js",
-    "test": "npm test"
+    "sync": "node scripts/sync-jellyfin.js",
+    "scheduler": "node scripts/scheduler.js",
+    "start": "node scripts/scheduler.js"
   },
   "dependencies": {
-    "node-fetch": "^3.0.0"
+    "dotenv": "^17.4.2",
+    "sharp": "^0.34.4"
   }
 }
