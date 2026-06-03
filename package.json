@@ -4,7 +4,8 @@
   "scripts": {
     "sync": "node scripts/sync-jellyfin.js",
     "scheduler": "node scripts/scheduler.js",
-    "start": "node scripts/scheduler.js"
+    "start": "node scripts/start.js",
+    "manual-web": "node scripts/manual-web.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
