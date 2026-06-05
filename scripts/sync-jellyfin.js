@@ -188,16 +188,26 @@ class JellyfinClient {
     return this.request('/Users');
   }
 
-  async fetchItemsPage({ includeItemTypes, startIndex, limit }) {
+  async fetchItemsPage({ includeItemTypes, startIndex, limit, sortBy, sortOrder }) {
     return this.request('/Items', {
       query: {
         Recursive: 'true',
         IncludeItemTypes: includeItemTypes,
         StartIndex: startIndex,
         Limit: limit,
-        Fields: 'Name,OriginalTitle,ProductionYear,CommunityRating,CriticRating,ImageTags',
-        SortBy: 'SortName',
-        SortOrder: 'Ascending',
+        Fields: 'Name,OriginalTitle,ProductionYear,CommunityRating,CriticRating,ImageTags,DateCreated,Tags,TagItems',
+        SortBy: sortBy,
+        SortOrder: sortOrder,
+      },
+    });
+  }
+
+  async fetchLatestItems({ userId, includeItemTypes, limit }) {
+    return this.request('/Users/' + encodeURIComponent(userId) + '/Items/Latest', {
+      query: {
+        IncludeItemTypes: includeItemTypes,
+        Limit: limit,
+        Fields: 'Name,OriginalTitle,ProductionYear,CommunityRating,CriticRating,ImageTags,DateCreated,Tags,TagItems',
       },
     });
   }
@@ -418,6 +428,37 @@ function normalizeRating(rating) {
   return Math.max(0, Math.min(10, Math.round(n * 10) / 10));
 }
 
+function getFilmAffinityMarkerTag() {
+  return String(process.env.SYNC_JELLYFIN_MARKER_TAG || 'FilmAffinity').trim() || 'FilmAffinity';
+}
+
+function normalizeTag(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function hasFilmAffinityMarker(item, markerTag = getFilmAffinityMarkerTag()) {
+  if (!item) return false;
+  const target = normalizeTag(markerTag);
+  const tags = [];
+
+  if (Array.isArray(item.Tags)) tags.push(...item.Tags);
+  if (Array.isArray(item.TagItems)) {
+    for (const tagItem of item.TagItems) {
+      if (tagItem && tagItem.Name) tags.push(tagItem.Name);
+    }
+  }
+
+  return tags.some((tag) => normalizeTag(tag) === target);
+}
+
+function addFilmAffinityMarker(payload, markerTag = getFilmAffinityMarkerTag()) {
+  if (!Array.isArray(payload.Tags)) payload.Tags = [];
+  if (!payload.Tags.some((tag) => normalizeTag(tag) === normalizeTag(markerTag))) {
+    payload.Tags.push(markerTag);
+  }
+  return payload;
+}
+
 function getBadgeColor(rating) {
   if (rating >= 7) return '#1f9d55';
   if (rating >= 5) return '#d97706';
@@ -584,7 +625,8 @@ async function processItemsBatch({ jellyfin, filmAffinityApi, items, opts, count
           const detailCritic = Number(itemDetails.CriticRating || 0);
           const detailCommunityChanged = Math.abs(detailCommunity - faRating) > 0.001;
           const detailCriticChanged = opts.setCritic && Math.abs(detailCritic - targetCritic) > 0.001;
-          const detailMetadataNeedsUpdate = opts.force || detailCommunityChanged || detailCriticChanged;
+          const detailMarkerMissing = opts.skipExistingRatings && !hasFilmAffinityMarker(itemDetails, opts.markerTag);
+          const detailMetadataNeedsUpdate = opts.force || detailCommunityChanged || detailCriticChanged || detailMarkerMissing;
 
           if (!detailMetadataNeedsUpdate) {
             counters.noChange += 1;
@@ -595,12 +637,12 @@ async function processItemsBatch({ jellyfin, filmAffinityApi, items, opts, count
               criticRating: opts.setCritic ? detailCritic : undefined,
             });
           } else {
-            const payload = normalizeItemPayloadForUpdate(itemDetails, {
+            const payload = addFilmAffinityMarker(normalizeItemPayloadForUpdate(itemDetails, {
               Id: item.Id,
               Name: item.Name || itemDetails.Name,
               CommunityRating: faRating,
               CriticRating: opts.setCritic ? targetCritic : itemDetails.CriticRating,
-            });
+            }), opts.markerTag);
 
             try {
               await withRetries(
@@ -688,6 +730,8 @@ async function fetchAllItems(jellyfin, opts) {
         includeItemTypes: opts.includeItemTypes,
         startIndex,
         limit: opts.pageSize,
+        sortBy: opts.sortBy,
+        sortOrder: opts.sortOrder,
       }),
       opts.retries,
       opts.retryDelayMs,
@@ -728,6 +772,7 @@ function createCounters() {
     posterFailed: 0,
     ratingBatchFailed: 0,
     ratingSingleFailed: 0,
+    existingRatingSkipped: 0,
     firstErrors: [],
   };
 }
@@ -743,6 +788,11 @@ function buildOptions() {
     setCritic: toBool(process.env.SYNC_JELLYFIN_SET_CRITIC, false),
     force: toBool(process.env.SYNC_JELLYFIN_FORCE, false),
     pageSize: Math.max(1, toInt(process.env.SYNC_JELLYFIN_PAGE_SIZE, 100)),
+    sortBy: process.env.SYNC_JELLYFIN_SORT_BY || 'SortName',
+    sortOrder: process.env.SYNC_JELLYFIN_SORT_ORDER || 'Ascending',
+    skipExistingRatings: toBool(process.env.SYNC_JELLYFIN_SKIP_EXISTING_RATINGS, false),
+    useLatestEndpoint: toBool(process.env.SYNC_JELLYFIN_USE_LATEST, false),
+    markerTag: getFilmAffinityMarkerTag(),
     includeItemTypes: parseIncludeTypes(),
     timeoutMs: Math.max(1000, toInt(process.env.JELLYFIN_TIMEOUT, 30000)),
     filmAffinityTimeoutMs: Math.max(1000, toInt(
@@ -778,6 +828,12 @@ async function runSync(opts, counters) {
     baseUrl: trimSlash(process.env.JELLYFIN_BASE_URL),
     includeItemTypes: opts.includeItemTypes,
     pageSize: opts.pageSize,
+    limit: opts.limit,
+    sortBy: opts.sortBy,
+    sortOrder: opts.sortOrder,
+    skipExistingRatings: opts.skipExistingRatings,
+    useLatestEndpoint: opts.useLatestEndpoint,
+    markerTag: opts.markerTag,
     dryRun: opts.dryRun,
     force: opts.force,
     enablePosterBadges: opts.enablePosterBadges,
@@ -818,8 +874,31 @@ async function runSync(opts, counters) {
 
   logger.info('Usuario Jellyfin para detalles', { userId: opts.jellyfinUserId });
 
-  const allItems = await fetchAllItems(jellyfin, opts);
-  logger.info('Items encontrados', { total: allItems.length });
+  const fetchedItems = opts.useLatestEndpoint
+    ? await withRetries(
+      () => jellyfin.fetchLatestItems({
+        userId: opts.jellyfinUserId,
+        includeItemTypes: opts.includeItemTypes,
+        limit: opts.limit > 0 ? opts.limit : opts.pageSize,
+      }),
+      opts.retries,
+      opts.retryDelayMs,
+      'fetch latest items'
+    )
+    : await fetchAllItems(jellyfin, opts);
+  logger.info('Items encontrados', { total: fetchedItems.length, source: opts.useLatestEndpoint ? 'latest' : 'items' });
+
+  const allItems = opts.skipExistingRatings
+    ? fetchedItems.filter((item) => !hasFilmAffinityMarker(item, opts.markerTag))
+    : fetchedItems;
+  counters.existingRatingSkipped += fetchedItems.length - allItems.length;
+
+  if (opts.skipExistingRatings) {
+    logger.info('Items sin nota para procesar', {
+      total: allItems.length,
+      skippedWithFilmAffinityMarker: counters.existingRatingSkipped,
+    });
+  }
 
   for (let i = 0; i < allItems.length; i += opts.batchSize) {
     const batch = allItems.slice(i, i + opts.batchSize);

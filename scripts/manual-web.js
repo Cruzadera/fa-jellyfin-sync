@@ -169,6 +169,23 @@ class JellyfinClient {
     });
   }
 
+  async getUsers() {
+    return this.request('/Users');
+  }
+
+  async fetchItemDetailsForUser(userId, itemId) {
+    return this.request('/Users/' + encodeURIComponent(userId) + '/Items/' + encodeURIComponent(itemId));
+  }
+
+  async updateItem(itemId, payload) {
+    return this.request('/Items/' + encodeURIComponent(itemId), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      responseType: 'text',
+    });
+  }
+
   downloadPrimaryImage(itemId) {
     return this.request(`/Items/${itemId}/Images/Primary`, {
       query: { Quality: 100, tag: Date.now() },
@@ -362,6 +379,70 @@ function itemToView(item) {
   };
 }
 
+function getFilmAffinityMarkerTag() {
+  return String(process.env.SYNC_JELLYFIN_MARKER_TAG || 'FilmAffinity').trim() || 'FilmAffinity';
+}
+
+function normalizeTag(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function addFilmAffinityMarker(payload, markerTag = getFilmAffinityMarkerTag()) {
+  if (!Array.isArray(payload.Tags)) payload.Tags = [];
+  if (!payload.Tags.some((tag) => normalizeTag(tag) === normalizeTag(markerTag))) {
+    payload.Tags.push(markerTag);
+  }
+  return payload;
+}
+
+function normalizeItemPayloadForUpdate(baseItem, updates) {
+  const payload = { ...baseItem, ...updates };
+  const arrayFields = [
+    'Genres',
+    'GenreItems',
+    'Studios',
+    'Tags',
+    'TagItems',
+    'People',
+    'ProviderIds',
+    'RemoteTrailers',
+    'BackdropImageTags',
+    'ParentBackdropImageTags',
+    'LockedFields',
+  ];
+
+  for (const field of arrayFields) {
+    if (payload[field] === null || payload[field] === undefined) {
+      payload[field] = field === 'ProviderIds' ? {} : [];
+    }
+  }
+
+  if (!payload.Name) payload.Name = baseItem && baseItem.Name ? baseItem.Name : updates.Name;
+  if (!payload.Id && baseItem && baseItem.Id) payload.Id = baseItem.Id;
+  return payload;
+}
+
+async function resolveJellyfinUserId(jellyfin) {
+  if (process.env.JELLYFIN_USER_ID) return process.env.JELLYFIN_USER_ID;
+  const users = await jellyfin.getUsers();
+  const resolved = Array.isArray(users)
+    ? (users.find((user) => user && user.Policy && user.Policy.IsAdministrator) || users[0])
+    : null;
+  if (!resolved || !resolved.Id) throw new Error('No Jellyfin user available for metadata update');
+  return resolved.Id;
+}
+
+async function updateItemRating(jellyfin, itemId, rating) {
+  const userId = await resolveJellyfinUserId(jellyfin);
+  const details = await jellyfin.fetchItemDetailsForUser(userId, itemId);
+  const payload = addFilmAffinityMarker(normalizeItemPayloadForUpdate(details, {
+    Id: itemId,
+    Name: details.Name,
+    CommunityRating: rating,
+  }));
+  await jellyfin.updateItem(itemId, payload);
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/items') {
     const query = String(url.searchParams.get('q') || '').trim();
@@ -398,7 +479,8 @@ async function handleApi(req, res, url) {
       toFloat(body.size || process.env.POSTER_BADGE_SIZE, 0.3)
     );
     await jellyfin.uploadPrimaryImage(itemId, withBadge, 'jpeg');
-    return sendJson(res, 200, { ok: true, itemId, rating, bytes: withBadge.length });
+    await updateItemRating(jellyfin, itemId, rating);
+    return sendJson(res, 200, { ok: true, itemId, rating, metadataUpdated: true, bytes: withBadge.length });
   }
 
   const posterMatch = req.method === 'GET' && url.pathname.match(/^\/api\/poster\/([^/]+)$/);
